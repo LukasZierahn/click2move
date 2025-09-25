@@ -27,17 +27,49 @@ local function draw_target_crosshair(player, position)
   }
 end
 
+-- Determines 8-way direction for character movement
+local function get_character_direction(from, to)
+  local distance = 0.1 -- Threshold to stop
+  local dx = from.x - to.x
+  local dy = from.y - to.y
+  if dx > distance then
+    -- west
+    if dy > distance then
+      return defines.direction.northwest
+    elseif dy < -distance then
+      return defines.direction.southwest
+    else
+      return defines.direction.west
+    end
+  elseif dx < -distance then
+    -- east
+    if dy > distance then
+      return defines.direction.northeast
+    elseif dy < -distance then
+      return defines.direction.southeast
+    else
+      return defines.direction.east
+    end
+  else
+    -- north/south
+    if dy > distance then
+      return defines.direction.north
+    elseif dy < -distance then
+      return defines.direction.south
+    end
+  end
+  return nil
+end
+
 -- Determines vehicle riding state to move towards a target
 local function get_vehicle_riding_state(vehicle, target_pos)
-  local angle_to_target = util_vector.angle(vehicle.position, target_pos)
-  local orientation_rad = vehicle.orientation * 2 * math.pi
-  local angle_diff = (angle_to_target - orientation_rad + math.pi) % (2 * math.pi) - math.pi
-
-  local direction = defines.riding.direction.straight
-  if angle_diff > 0.1 then direction = defines.riding.direction.right
-  elseif angle_diff < -0.1 then direction = defines.riding.direction.left end
-
-  return { direction = direction, acceleration = defines.riding.acceleration.accelerating }
+  local radians = vehicle.orientation * 2 * math.pi
+  local v1 = {x = target_pos.x - vehicle.position.x, y = target_pos.y - vehicle.position.y}
+  local dir = v1.x * math.sin(radians + math.pi / 2) - v1.y * math.cos(radians + math.pi / 2)
+  local acc = v1.x * math.sin(radians) - v1.y * math.cos(radians)
+  local direction = (dir < -0.2 and defines.riding.direction.left) or (dir > 0.2 and defines.riding.direction.right) or defines.riding.direction.straight
+  local acceleration = (acc < -0.2 and defines.riding.acceleration.reversing) or (acc > 0.2 and defines.riding.acceleration.accelerating) or defines.riding.acceleration.braking
+  return {direction = direction, acceleration = acceleration}
 end
 
 -- Forward-declare event handlers
@@ -49,7 +81,6 @@ local on_tick
 local PROXIMITY_THRESHOLD = 1.5
 local UPDATE_INTERVAL = 1 -- Ticks between movement updates (1 for smoother movement)
 local VEHICLE_PROXIMITY_THRESHOLD = 6.0
-local MANUAL_DIRECTION_THRESHOLD = 0.05 -- Tolerance for direction difference (radians fraction, ~18 degrees)
 local DEBUG_MODE = true -- Set to false to disable debug messages
 
 -- A non-persistent table to store active movement data.
@@ -229,31 +260,17 @@ on_tick = function(event)
           -- Re-check waypoint after potential increment
           waypoint = data.path[data.current_waypoint]
           if waypoint and waypoint.position then
-            local angle = util_vector.angle(character.position, waypoint.position)
-            -- Continuous direction (0.0 east to 1.0 full circle CCW)
-            local expected_direction = ((angle + 2 * math.pi) % (2 * math.pi)) / (2 * math.pi)
-
-            -- Detect manual input: if already walking but direction differs significantly from expected
-            if character.walking_state.walking and math.abs(character.walking_state.direction - expected_direction) > MANUAL_DIRECTION_THRESHOLD then
-              -- Print cancellation message only once
-              if not data.is_cancelling then
-                if player.connected then player.print("Movement cancelled.") end
-                data.is_cancelling = true
-              end
-              -- Immediately stop character movement to prevent fighting with player input
-              if character then
-                character.walking_state.walking = false
-              end
-              -- Set flag to clean up and stop processing this path
-              stop_movement = true
-            else
-              data.is_cancelling = false -- Reset cancellation flag
+            local direction = get_character_direction(character.position, waypoint.position)
+            if direction then
               if DEBUG_MODE then
-                player.print("Click2Move: Setting walk to true, direction: " .. expected_direction)
+                player.print("Click2Move: Setting walk to true, direction: " .. direction)
               end
-              -- Move the character towards the current waypoint
               character.walking_state.walking = true
-              character.walking_state.direction = expected_direction
+              character.walking_state.direction = direction
+            else
+              -- Reached waypoint, let's check next one on next tick
+              character.walking_state.walking = false
+              stop_movement = true
             end
           else
             stop_movement = true
