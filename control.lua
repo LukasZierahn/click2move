@@ -1,141 +1,206 @@
 --[[
   Click2Move control.lua
-  Author: Me
+  Author: Henrique
   Description: Allows players to click to move their character.
 ]]
 
--- Declare local variables that will be populated later
-local util_vector = {}
-
 -- Vector utility functions
+local util_vector = {}
 util_vector.distance = function(a, b)
-  local dx = a.x - b.x
-  local dy = a.y - b.y
-  return math.sqrt(dx * dx + dy * dy)
+  return math.sqrt((a.x - b.x)^2 + (a.y - b.y)^2)
 end
-
 util_vector.angle = function(a, b)
-  local dx = b.x - a.x
-  local dy = b.y - a.y
-  return math.atan2(dy, dx)
+  return math.atan2(b.y - a.y, b.x - a.x)
 end
 
--- Forward-declare event handlers so they can be registered before they are defined
+-- Forward-declare event handlers
 local on_custom_input
 local on_path_request_finished
 local on_tick
 
 -- Constants
 local PROXIMITY_THRESHOLD = 1.5
-local UPDATE_INTERVAL = 5 -- Ticks between movement updates
+local UPDATE_INTERVAL = 1 -- Ticks between movement updates (1 for smoother movement)
+local DEBUG_MODE = true -- Set to false to disable debug messages
 
--- Generate a unique event ID for pathfinding callbacks
-local C2M_PATH_EVENT = script.generate_event_name()
-
--- A non-persistent table to store active paths. It will be cleared on game load.
-local active_paths = {}
--- Track which players have had their movement cancelled to avoid spamming messages
-local movement_cancelled = {}
+-- A non-persistent table to store active movement data.
+-- It will be cleared on game load.
+local player_move_data = {}
 
 -- Handles the custom input to initiate movement
 on_custom_input = function(event)
+  if DEBUG_MODE then game.print("Custom Input Handler Called!") end
   if event.input_name ~= "c2m-move-command" then return end
 
   local player = game.players[event.player_index]
-  local position = event.location
-  player.print("left click!") -- To check if event is working
+  -- Ensure player, character, and location are valid. Also, don't allow movement if in a vehicle.
+  if not player or not player.character or not event.location or player.vehicle then return end
 
-  if not player or not position or not player.character then return end
+  if not player.connected then return end
 
-  local code = player.surface.request_path {
+  -- If a new move command is issued, clear any existing path data for this player.
+  if player_move_data[player.index] then
+    player_move_data[player.index] = nil
+  end
+
+  if DEBUG_MODE then player.print("Click2Move: Path request initiated.") end
+
+  -- Request path and store the ID for matching in the callback
+  local path_id = player.surface.request_path {
     bounding_box = player.character.prototype.collision_box,
-    collision_mask = player.character.prototype.collision_mask or {"player-layer", "object-layer", "water-tile"},
-    start = player.character.position,
-    goal = position,
+    collision_mask = player.character.prototype.collision_mask,
+    start = player.position,
+    goal = event.location,
     pathfind_flags = { allow_destroy_friendly_entities = true },
-    force = "character",
-    player_index = player.index,
-    event = C2M_PATH_EVENT -- Tell Factorio to fire our custom event on completion
+    force = player.force.name,
+    entity_to_ignore = player.character
   }
-  player.print(code)
+
+  -- Temporarily store the path ID
+  player_move_data[player.index] = { path_id = path_id, requesting_player_index = player.index }
 end
 
 -- Handles the result of the path request
 on_path_request_finished = function(event)
-  if not event.player_index or not game.players[event.player_index] then return end
-  local player = game.players[event.player_index]
-  player.print("path request  finished")
-  if not player then return end
+  -- Find the player who requested this path ID
+  local matched_player_index = nil
+  for p_index, data in pairs(player_move_data) do
+    if data.path_id == event.id then
+      matched_player_index = p_index
+      break
+    end
+  end
+
+  if not matched_player_index then return end
+
+  local player = game.players[matched_player_index]
+  if not player or not player.connected then return end
+
+  -- Clean up temp path_id storage
+  player_move_data[matched_player_index].path_id = nil
 
   if event.path and #event.path > 0 then
-    -- Uncomment the next line for debugging:
-    -- player.print("Path found! It has " .. #event.path .. " waypoints.")
-    active_paths[player.index] = { path = event.path, current_waypoint = 1 }
+    if DEBUG_MODE then player.print("Path found with " .. #event.path .. " waypoints.") end
+    -- Store the path and reset state
+    player_move_data[matched_player_index] = {
+      path = event.path,
+      current_waypoint = 1,
+      is_cancelling = false,
+      is_auto_walking = false  -- Flag to ignore self-induced walking
+    }
+
+    -- Render the path for the player to see (store rendering IDs to clean up later if needed)
+    local render_ids = {}
+    for _, waypoint in ipairs(event.path) do
+      local render_id = rendering.draw_circle{
+        color = {r = 0.1, g = 0.8, b = 0.1, a = 0.5},
+        radius = 0.5,
+        target = waypoint,  -- waypoint is {x,y}
+        surface = player.surface,
+        players = {player}, -- Only show to the requesting player
+        time_to_live = 600 -- 10 seconds
+      }
+      table.insert(render_ids, render_id)
+    end
+    player_move_data[matched_player_index].render_ids = render_ids
   else
-    player.print("Path not found.")
+    if event.try_again_later then
+      -- Re-request after a short delay
+      if DEBUG_MODE then player.print("Click2Move: Path temporarily unavailable, retrying...") end
+      script.on_nth_tick(game.tick + 60, function()
+        -- Re-issue the request (simplified; in full impl, store original goal)
+        local orig_data = player_move_data[matched_player_index]
+        if orig_data and orig_data.requesting_player_index then
+          -- You'd need to store the original goal in data; for now, assume we clear if no retry data
+          player_move_data[matched_player_index] = nil
+        end
+      end)
+    else
+      player.print("Click2Move: No path found.")
+    end
+    -- Clear data if failed
+    player_move_data[matched_player_index] = nil
   end
-  -- else
-  --   player.print("Path not found.") -- Uncomment for debugging if needed
 end
 
 -- Handles player movement each tick
 on_tick = function(event)
-  if not util_vector then return end
-  if event.tick % UPDATE_INTERVAL ~= 0 then return end
-
-  for player_index, data in pairs(active_paths) do
+  -- if DEBUG_MODE then game.print("Annoying print!") end
+  for player_index, data in pairs(player_move_data) do
     local player = game.players[player_index]
     local stop_movement = false
+    local character = player and player.character
 
-    if not player or not player.character then
+    if not character or not player.connected then
       stop_movement = true
-    elseif player.character.walking_state.walking then -- Movement interruption by the player
+    elseif data.is_cancelling then
       stop_movement = true
-      if not movement_cancelled[player_index] then
+    -- Player is manually moving (and not in a vehicle)
+    elseif character.walking_state.walking and not character.driving and not data.is_auto_walking then
+      stop_movement = true
+      -- Print cancellation message only once
+      if not data.is_cancelling then
         player.print("Movement cancelled.")
-        movement_cancelled[player_index] = true
+        data.is_cancelling = true
       end
     else
       local waypoint = data.path[data.current_waypoint]
       if waypoint then
-        movement_cancelled[player_index] = nil
-        local distance = util_vector.distance(player.character.position, waypoint.position)
+        data.is_cancelling = false -- Reset cancellation flag
+        data.is_auto_walking = true -- Set flag for this tick's auto-move
+        local distance = util_vector.distance(character.position, waypoint)
+
         if distance < PROXIMITY_THRESHOLD then
           data.current_waypoint = data.current_waypoint + 1
-          if data.current_waypoint > #data.path then
-            stop_movement = true
-          end
-        else
-          local angle = util_vector.angle(player.character.position, waypoint.position)
-          -- Use defines.direction constants directly from the global defines
-          -- local direction = defines.direction.from_angle(angle)
+          data.is_auto_walking = false -- Reset after increment
         end
+
+        if data.current_waypoint > #data.path then
+          stop_movement = true
+        else
+          -- Re-check waypoint after potential increment
+          waypoint = data.path[data.current_waypoint]
+          if waypoint then
+            local angle = util_vector.angle(character.position, waypoint)
+            -- Continuous direction (0.0 east to 1.0 full circle CCW)
+            local direction = ((angle + 2 * math.pi) % (2 * math.pi)) / (2 * math.pi)
+            -- Move the character towards the current waypoint
+            character.walking_state.walking = true
+            character.walking_state.direction = direction
+          end
+        end
+      else
+        stop_movement = true -- Path is finished
       end
     end
- end
+
+    if stop_movement then
+      if character then
+        character.walking_state.walking = false
+        -- Direction persists automatically
+      end
+      -- Clean up renderings if present
+      if data.render_ids then
+        for _, render_id in ipairs(data.render_ids) do
+          rendering.destroy(render_id)
+        end
+      end
+      -- Remove the player's path from the active list
+      player_move_data[player_index] = nil
+    end
+  end
 end
 
+-- Centralized function for event registration
 local function initialize()
-  -- Register event handlers. It's safe to call this multiple times,
-  -- as new registrations for an event simply replace the old ones.
+  if DEBUG_MODE then game.print("Click2Move mod activated") end
   script.on_event("c2m-move-command", on_custom_input)
-  script.on_event(C2M_PATH_EVENT, on_path_request_finished)
-  script.on_event(defines.events.on_tick, on_tick)
+  script.on_event(defines.events.on_script_path_request_finished, on_path_request_finished)
+  script.on_nth_tick(UPDATE_INTERVAL, on_tick)
+  -- Clear data on load
+  player_move_data = {}
 end
 
--- Initializes global data on new game
-script.on_init(function()
-  initialize()
-end)
-
--- Handles loading data from a save file
-script.on_load(function()
-  -- The script.global table is loaded automatically by the game before this event.
-  -- Re-running initialize is safe and handles mod updates gracefully.
-  initialize()
-end)
-
--- Ensures data structure exists and events are registered when mod configuration changes
-script.on_configuration_changed(function()
-  initialize()
-end)
+script.on_init(initialize)
+script.on_load(initialize)
+script.on_configuration_changed(initialize)
