@@ -172,12 +172,17 @@ on_tick = function(event)
 
             -- Detect manual input: if already walking but direction differs significantly from expected
             if character.walking_state.walking and math.abs(character.walking_state.direction - expected_direction) > MANUAL_DIRECTION_THRESHOLD then
-              stop_movement = true
               -- Print cancellation message only once
               if not data.is_cancelling then
                 if player.connected then player.print("Movement cancelled.") end
                 data.is_cancelling = true
               end
+              -- Immediately stop character movement to prevent fighting with player input
+              if character then
+                character.walking_state.walking = false
+              end
+              -- Set flag to clean up and stop processing this path
+              stop_movement = true
             else
               data.is_cancelling = false -- Reset cancellation flag
               if DEBUG_MODE then
@@ -204,9 +209,8 @@ on_tick = function(event)
       -- Clean up renderings if present (use get_object_by_id and :destroy)
       if data.render_ids then
         for _, render_id in ipairs(data.render_ids) do
-          local render_obj = rendering.get_object_by_id(render_id)
-          if render_obj and render_obj.valid then
-            render_obj:destroy()
+          if render_id and render_id.valid then
+            render_id:destroy()
           end
         end
         data.render_ids = nil
