@@ -21,6 +21,7 @@ local on_tick
 -- Constants
 local PROXIMITY_THRESHOLD = 1.5
 local UPDATE_INTERVAL = 1 -- Ticks between movement updates (1 for smoother movement)
+local MANUAL_DIRECTION_THRESHOLD = 0.05 -- Tolerance for direction difference (radians fraction, ~18 degrees)
 local DEBUG_MODE = true -- Set to false to disable debug messages
 
 -- A non-persistent table to store active movement data.
@@ -89,7 +90,6 @@ on_path_request_finished = function(event)
       path = event.path,
       current_waypoint = 1,
       is_cancelling = false,
-      is_auto_walking = false, -- Flag to ignore self-induced walking
       goal = current_data.goal -- Preserve for any future needs
     }
 
@@ -99,7 +99,7 @@ on_path_request_finished = function(event)
       local render_id = rendering.draw_circle{
         color = {r = 0.1, g = 0.8, b = 0.1, a = 0.5},
         radius = 0.5,
-        target = waypoint,  -- waypoint is {x,y}
+        target = waypoint.position,  -- Use .position
         surface = player.surface,
         players = {player}, -- Only show to the requesting player
         time_to_live = 600 -- 10 seconds
@@ -112,14 +112,13 @@ on_path_request_finished = function(event)
       -- Re-request after a short delay, using stored goal
       if DEBUG_MODE then player.print("Click2Move: Path temporarily unavailable, retrying...") end
       local retry_goal = current_data.goal
-      local retry_start = player.position -- Use current position for retry
       script.on_nth_tick(game.tick + 60, function()
         local still_valid_player = game.players[matched_player_index]
         if still_valid_player and still_valid_player.character and not still_valid_player.vehicle then
           local retry_path_id = still_valid_player.surface.request_path {
             bounding_box = still_valid_player.character.prototype.collision_box,
             collision_mask = still_valid_player.character.prototype.collision_mask,
-            start = retry_start,
+            start = still_valid_player.position,  -- Use current position at retry time
             goal = retry_goal,
             pathfind_flags = { allow_destroy_friendly_entities = true },
             force = still_valid_player.force.name,
@@ -152,21 +151,10 @@ on_tick = function(event)
 
     if not character or not player.connected then
       stop_movement = true
-    elseif data.is_cancelling then
-      stop_movement = true
-    -- Player is manually moving (and not in a vehicle)
-    elseif character.walking_state.walking and not character.driving and not data.is_auto_walking then
-      stop_movement = true
-      -- Print cancellation message only once
-      if not data.is_cancelling then
-        if player.connected then player.print("Movement cancelled.") end
-        data.is_cancelling = true
-      end
     else
       local waypoint = data.path[data.current_waypoint]
-      if waypoint then
-        data.is_cancelling = false -- Reset cancellation flag
-        local distance = util_vector.distance(character.position, waypoint)
+      if waypoint and waypoint.position then
+        local distance = util_vector.distance(character.position, waypoint.position)
 
         if distance < PROXIMITY_THRESHOLD then
           data.current_waypoint = data.current_waypoint + 1
@@ -177,19 +165,34 @@ on_tick = function(event)
         else
           -- Re-check waypoint after potential increment
           waypoint = data.path[data.current_waypoint]
-          if waypoint then
-            data.is_auto_walking = true -- Set flag for this tick's auto-move
-            local angle = util_vector.angle(character.position, waypoint)
+          if waypoint and waypoint.position then
+            local angle = util_vector.angle(character.position, waypoint.position)
             -- Continuous direction (0.0 east to 1.0 full circle CCW)
-            local direction = ((angle + 2 * math.pi) % (2 * math.pi)) / (2 * math.pi)
-            -- Move the character towards the current waypoint
-            character.walking_state.walking = true
-            character.walking_state.direction = direction
-            data.is_auto_walking = false -- Reset after move
+            local expected_direction = ((angle + 2 * math.pi) % (2 * math.pi)) / (2 * math.pi)
+
+            -- Detect manual input: if already walking but direction differs significantly from expected
+            if character.walking_state.walking and math.abs(character.walking_state.direction - expected_direction) > MANUAL_DIRECTION_THRESHOLD then
+              stop_movement = true
+              -- Print cancellation message only once
+              if not data.is_cancelling then
+                if player.connected then player.print("Movement cancelled.") end
+                data.is_cancelling = true
+              end
+            else
+              data.is_cancelling = false -- Reset cancellation flag
+              if DEBUG_MODE then
+                player.print("Click2Move: Setting walk to true, direction: " .. expected_direction)
+              end
+              -- Move the character towards the current waypoint
+              character.walking_state.walking = true
+              character.walking_state.direction = expected_direction
+            end
+          else
+            stop_movement = true
           end
         end
       else
-        stop_movement = true -- Path is finished
+        stop_movement = true -- Path is finished or invalid waypoint
       end
     end
 
@@ -198,11 +201,15 @@ on_tick = function(event)
         character.walking_state.walking = false
         -- Direction persists automatically
       end
-      -- Clean up renderings if present
+      -- Clean up renderings if present (use get_object_by_id and :destroy)
       if data.render_ids then
         for _, render_id in ipairs(data.render_ids) do
-          rendering.destroy(render_id)
+          local render_obj = rendering.get_object_by_id(render_id)
+          if render_obj and render_obj.valid then
+            render_obj:destroy()
+          end
         end
+        data.render_ids = nil
       end
       -- Remove the player's path from the active list
       player_move_data[player_index] = nil
