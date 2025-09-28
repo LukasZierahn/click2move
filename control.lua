@@ -13,18 +13,36 @@ util_vector.angle = function(a, b)
   return math.atan2(b.y - a.y, b.x - a.x)
 end
 
--- Draws a crosshair at a given position for a player
-local function draw_target_crosshair(player, position)
+-- Draws a crosshair at a given position for a player. color optional (defaults to green)
+local function draw_target_crosshair(player, position, color)
   local size = 0.5
-  local color = {r = 0.1, g = 0.8, b = 0.1, a = 0.7}
+  local default_color = {r = 0.1, g = 0.8, b = 0.1, a = 0.9}
+  local col = color or player.color or default_color
+  if not col.a then col.a = 0.9 end
   local surface = player.surface
   local players = {player}
   local time_to_live = 600 -- 10 seconds
 
-  local ids = {}
-  table.insert(ids, rendering.draw_line{ color = color, width = 3, from = {x = position.x - size, y = position.y}, to = {x = position.x + size, y = position.y}, surface = surface, players = players, time_to_live = time_to_live })
-  table.insert(ids, rendering.draw_line{ color = color, width = 3, from = {x = position.x, y = position.y - size}, to = {x = position.x, y = position.y + size}, surface = surface, players = players, time_to_live = time_to_live })
-  return ids
+  local objs = {}
+  table.insert(objs, rendering.draw_line{
+    color = col,
+    width = 3,
+    from = {x = position.x - size, y = position.y},
+    to   = {x = position.x + size, y = position.y},
+    surface = surface,
+    players = players,
+    time_to_live = time_to_live
+  })
+  table.insert(objs, rendering.draw_line{
+    color = col,
+    width = 3,
+    from = {x = position.x, y = position.y - size},
+    to   = {x = position.x, y = position.y + size},
+    surface = surface,
+    players = players,
+    time_to_live = time_to_live
+  })
+  return objs
 end
 
 -- Determines 8-way direction for character movement (returns defines.direction constants)
@@ -103,14 +121,23 @@ local function create_path_request_params(player, goal)
   -- For characters, use a slightly larger bounding box to avoid getting stuck on corners.
   if pathfind_for_character then
     local margin = settings.global["c2m-character-margin"] and settings.global["c2m-character-margin"].value or 0.45
-    bounding_box = {
-      left_top = { x = bounding_box.left_top.x - margin, y = bounding_box.left_top.y - margin },
-      right_bottom = { x = bounding_box.right_bottom.x + margin, y = bounding_box.right_bottom.y + margin }
-    }
+    -- ensure bounding_box has left_top / right_bottom structure
+    if bounding_box.left_top and bounding_box.right_bottom then
+      bounding_box = {
+        left_top = { x = bounding_box.left_top.x - margin, y = bounding_box.left_top.y - margin },
+        right_bottom = { x = bounding_box.right_bottom.x + margin, y = bounding_box.right_bottom.y + margin }
+      }
+    else
+      -- fallback simple box
+      bounding_box = {
+        left_top = { x = -margin, y = -margin },
+        right_bottom = { x = margin, y = margin }
+      }
+    end
   end
 
   -- Defensive access to collision_mask (vehicles/characters have one)
-  local collision_mask = entity_to_move.prototype.collision_mask or {}
+  local collision_mask = (entity_to_move.prototype and entity_to_move.prototype.collision_mask) and entity_to_move.prototype.collision_mask or {}
 
   return {
     bounding_box = bounding_box,
@@ -222,24 +249,54 @@ local function on_path_request_finished(event)
     data.retry_count = 0
     data.retry_at = nil
 
-    -- render visual waypoints (characters only)
+    -- render visual path as polyline (characters only)
     local render_objs = {}
-    if not player.vehicle then
-      for _, waypoint in ipairs(event.path) do
-        local render_obj = rendering.draw_circle{
-          color = {r = 0.1, g = 0.8, b = 0.1, a = 0.5},
-          radius = 0.5,
-          target = waypoint.position,
+    if not player.vehicle and event.path and #event.path > 0 then
+      -- build list of positions
+      local points = {}
+      for _, wp in ipairs(event.path) do
+        if wp and wp.position then
+          table.insert(points, wp.position)
+        end
+      end
+
+      -- choose color: player's color if available, otherwise a fallback
+      local path_color = player.color or {r = 0.1, g = 0.8, b = 0.1, a = 0.9}
+      if not path_color.a then path_color.a = 0.9 end
+
+      -- draw a line for each segment
+      for i = 1, math.max(0, #points - 1) do
+        local from = points[i]
+        local to = points[i + 1]
+        local seg = rendering.draw_line{
+          color = path_color,
+          width = 2,
+          from = from,
+          to = to,
           surface = player.surface,
           players = {player},
           time_to_live = 600
         }
-        table.insert(render_objs, render_obj)
+        table.insert(render_objs, seg)
+      end
+
+      -- if there's only one point (degenerate path), draw a small circle/dot
+      if #points == 1 then
+        local dot = rendering.draw_circle{
+          color = path_color,
+          radius = 0.3,
+          target = points[1],
+          surface = player.surface,
+          players = {player},
+          time_to_live = 600
+        }
+        table.insert(render_objs, dot)
       end
     end
-    -- crosshair at destination
-    local crosshair_ids = draw_target_crosshair(player, data.goal)
-    for _, id in ipairs(crosshair_ids) do table.insert(render_objs, id) end
+
+    -- crosshair at destination (use same color)
+    local crosshair_objs = draw_target_crosshair(player, data.goal, player.color)
+    for _, o in ipairs(crosshair_objs) do table.insert(render_objs, o) end
 
     data.render_objs = render_objs
   else
@@ -266,7 +323,7 @@ end
 local function safe_destroy_renderings(render_objs)
   if not render_objs then return end
   for _, robj in ipairs(render_objs) do
-    if robj then
+    if robj and robj.valid then
       robj:destroy()
     end
   end
@@ -447,15 +504,14 @@ local function initialize()
   script.on_nth_tick(interval, on_tick)
 
   -- we do not persist player_move_data across saves; clear on init/config changes
-  -- (it's safe to keep it empty on load; not serializable)
   player_move_data = {}
 end
 
 script.on_init(initialize)
 script.on_configuration_changed(initialize)
--- script.on_load should not perform heavy initialization, but to be safe we re-register handlers
+
+-- script.on_load should re-register event handlers (closures invalid across load)
 script.on_load(function()
-  -- rebind the handlers so closures are valid after load
   script.on_event("c2m-move-command", on_custom_input)
   script.on_event("bazinga", function (event)
     local player = game.players[event.player_index]
