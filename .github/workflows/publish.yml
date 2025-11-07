@@ -86,17 +86,15 @@ jobs:
             xargs -0 zip "$ZIP_NAME" -@
           echo "zip_file=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: Check API key present
-        if: ${{ !secrets.API_KEY }}
-        run: |
-          echo "Missing API_KEY secret; aborting"
-          exit 1
-
       - name: Initialize publish
         id: init
         env:
           API_KEY: ${{ secrets.API_KEY }}
         run: |
+          if [ -z "$API_KEY" ]; then
+            echo "Error: API_KEY secret is not set. Please configure it in the 'Portal' environment secrets." >&2
+            exit 1
+          fi
           set -euxo pipefail
           MOD_NAME="${{ steps.validate.outputs.name }}"
           # POST to init_publish; capture body and HTTP code
