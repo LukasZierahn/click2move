@@ -1,0 +1,4 @@
+# Exclude development-specific files from the release archive created by 'git archive'.
+.gitattributes export-ignore
+.github export-ignore
+.gitignore export-ignore

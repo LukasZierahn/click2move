@@ -1,0 +1,150 @@
+name: Publish Mod
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+\.[0-9]+\.[0-9]+'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: Portal
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq zip
+
+      - name: Determine version and normalize (strip leading "v")
+        id: version
+        run: |
+          set -euxo pipefail
+          # GITHUB_REF is like refs/tags/v1.2.3
+          REF="${GITHUB_REF##refs/tags/}"
+          # strip leading v if present
+          VERSION="${REF#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update version in info.json (working tree)
+        run: |
+          set -euxo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ -z "$VERSION" ]; then
+            echo "VERSION empty; aborting"
+            exit 1
+          fi
+          if [ ! -f info.json ]; then
+            echo "info.json not found"
+            exit 1
+          fi
+          # Overwrite info.json with new version
+          jq ".version = \"$VERSION\"" info.json > info.json.tmp
+          mv info.json.tmp info.json
+          echo "Updated info.json version to $VERSION"
+
+      - name: Validate info.json (name & version)
+        id: validate
+        run: |
+          set -euxo pipefail
+          NAME=$(jq -r '.name // empty' info.json)
+          VER=$(jq -r '.version // empty' info.json)
+          if [ -z "$NAME" ] || [ -z "$VER" ]; then
+            echo "info.json missing name or version (name='$NAME', version='$VER')"
+            cat info.json
+            exit 1
+          fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Extract mod name (output for later steps)
+        id: mod
+        run: |
+          echo "name=${{ steps.validate.outputs.name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create mod archive from working tree
+        id: create-zip
+        run: |
+          set -euxo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          MOD_NAME="${{ steps.validate.outputs.name }}"
+          ZIP_NAME="${MOD_NAME}_${VERSION}.zip"
+          # Use git ls-files to include only tracked files (avoid untracked temp files)
+          # and exclude development/repo files that shouldn't be in the mod package.
+          git ls-files -z \
+            --exclude='.github/*' \
+            --exclude='.gitignore' \
+            --exclude='*.md' \
+            --exclude='*.txt' \
+            --exclude='*.yml' | \
+            xargs -0 zip "$ZIP_NAME" -@
+          echo "zip_file=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Check API key present
+        if: ${{ !secrets.API_KEY }}
+        run: |
+          echo "Missing API_KEY secret; aborting"
+          exit 1
+
+      - name: Initialize publish
+        id: init
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          set -euxo pipefail
+          MOD_NAME="${{ steps.validate.outputs.name }}"
+          # POST to init_publish; capture body and HTTP code
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://mods.factorio.com/api/v2/mods/init_publish" \
+            -H "Authorization: Bearer $API_KEY" \
+            -F "mod=$MOD_NAME")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "HTTP code: $HTTP_CODE"
+          echo "Response body: $BODY"
+          # Accept 200 or 201 as success; prefer checking for an upload_url
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            echo "Init publish failed with HTTP $HTTP_CODE"
+            echo "$BODY" | jq .
+            exit 1
+          fi
+          UPLOAD_URL=$(echo "$BODY" | jq -r '.upload_url // empty')
+          if [ -z "$UPLOAD_URL" ]; then
+            echo "init_publish response didn't include upload_url"
+            echo "$BODY" | jq .
+            exit 1
+          fi
+          echo "upload_url=$UPLOAD_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Upload and finish publish
+        env:
+          UPLOAD_URL: ${{ steps.init.outputs.upload_url }}
+        run: |
+          set -euxo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          MOD_NAME="${{ steps.validate.outputs.name }}"
+          ZIP_FILE="${MOD_NAME}_${VERSION}.zip"
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "Zip file not found: $ZIP_FILE"
+            ls -la
+            exit 1
+          fi
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$UPLOAD_URL" \
+            -F "file=@$ZIP_FILE" \
+            -F "source_url=${{ github.server_url }}/${{ github.repository }}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "HTTP code: $HTTP_CODE"
+          echo "Response body: $BODY"
+          if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+            echo "Upload failed with HTTP $HTTP_CODE"
+            echo "$BODY" | jq .
+            exit 1
+          fi
+          # Print JSON response prettily
+          echo "$BODY" | jq .
