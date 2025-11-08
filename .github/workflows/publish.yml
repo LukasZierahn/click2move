@@ -58,12 +58,12 @@ jobs:
           # This gets the second to last tag from a version-sorted list of tags
           PREVIOUS_TAG=$(git tag --sort=-v:refname | sed -n '2p')
 
-          if [ -z "$PREVIOUS_TAG" ]; then
+          if [ -z "$PREVIOUS_TAG" ]; then # if no previous tag, use all commits
             echo "No previous tag found, creating changelog from all commits."
-            git log --pretty=format:"- %s" > "$CHANGELOG_FILE"
+            git log --pretty=format:"- %s" --reverse > "$CHANGELOG_FILE"
           else
             echo "Generating changelog from $PREVIOUS_TAG to ${{ github.ref_name }}"
-            git log "${PREVIOUS_TAG}".."${{ github.ref_name }}" --pretty=format:"- %s" > "$CHANGELOG_FILE"
+            git log "${PREVIOUS_TAG}".."${{ github.ref_name }}" --pretty=format:"- %s" --reverse > "$CHANGELOG_FILE"
           fi
           echo "Generated ${CHANGELOG_FILE}:"
           cat "$CHANGELOG_FILE"
@@ -105,7 +105,7 @@ jobs:
 
           echo "zip_file=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: Initialize publish
+      - name: Initialize upload
         id: init
         env:
           API_KEY: ${{ secrets.API_KEY }}
@@ -116,8 +116,7 @@ jobs:
           fi
           set -euxo pipefail
           MOD_NAME="${{ steps.validate.outputs.name }}"
-          VERSION="${{ steps.version.outputs.version }}"
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://mods.factorio.com/api/v2/mods/releases/init_publish" \
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://mods.factorio.com/api/v2/mods/releases/init_upload" \
             -H "Authorization: Bearer $API_KEY" \
             -F "mod=$MOD_NAME")
           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
@@ -126,7 +125,7 @@ jobs:
           echo "Response body: $BODY"
           # Accept 200 or 201 as success; prefer checking for an upload_url
           if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
-            echo "Init publish failed with HTTP $HTTP_CODE"
+            echo "Init upload failed with HTTP $HTTP_CODE"
             echo "$BODY" | jq .
             exit 1
           fi
@@ -138,7 +137,7 @@ jobs:
           fi
           echo "upload_url=$UPLOAD_URL" >> "$GITHUB_OUTPUT"
 
-      - name: Upload and finish publish
+      - name: Upload and finish release
         env:
           UPLOAD_URL: ${{ steps.init.outputs.upload_url }}
         run: |
@@ -152,8 +151,7 @@ jobs:
           fi
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "$UPLOAD_URL" \
             -F "file=@$ZIP_FILE" \
-            -F "source_url=${{ github.server_url }}/${{ github.repository }}" \
-            -F "changelog=@CHANGELOG.md")
+            -F "source_url=${{ github.server_url }}/${{ github.repository }}")
           HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
           BODY=$(echo "$RESPONSE" | sed '$d')
           echo "HTTP code: $HTTP_CODE"
