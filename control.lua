@@ -163,6 +163,14 @@ local function DEBUG_MODE(player_index)
   return s and s["c2m-debug-mode"] and s["c2m-debug-mode"].value
 end
 
+-- Check if the player is wearing "mech-armor"
+local function is_wearing_mech(player)
+  if not player or not player.character or not player.character.get_inventory then return false end
+  local armor_inv = player.character.get_inventory(defines.inventory.character_armor).get_contents()
+  if not armor_inv or #armor_inv == 0 then return false end
+  return armor_inv[1].name == "mech-armor"
+end
+
 -- Persistent-in-session table (cleared on init/config change)
 local player_move_data = {}
 
@@ -298,6 +306,14 @@ local function on_custom_input(event)
 
   local data = ensure_player_data(player.index)
   local goal = { x = event.cursor_position.x, y = event.cursor_position.y }
+
+  -- If wearing mech armor, use straight-line movement and bypass pathfinding
+  if is_wearing_mech(player) then
+    data.goals = { goal }
+    data.is_straight_line_move = true -- Custom flag for our new mode
+    update_gui_for_player(player.index)
+    return
+  end
 
   if event.input_name == "c2m-move-command-queue" then
     -- queue this goal
@@ -481,9 +497,62 @@ local function on_tick(event)
       goto continue
     end
 
-    -- if no active path and retry time arrived, request again
-    if (not data.path) and (not data.path_id) and data.retry_at and data.retry_at <= game.tick then
-      start_path_request_for_player(player_index)
+    local stop_movement = false
+    -- Declare these here to avoid goto jumping over their scope
+    local entity_to_move = player.vehicle or player.character
+    local vehicle = player.vehicle
+
+    -- Handle straight-line movement for mech-armor
+    if data.is_straight_line_move then
+      local character = player.character
+      local goal = data.goals[1]
+
+      -- Stop if no character, no goal, or armor was removed
+      if not character or not goal or not is_wearing_mech(player) then
+        if character and goal and not is_wearing_mech(player) then
+          -- Armor removed, switch to normal pathfinding
+          if DEBUG_MODE(player_index) then player.print("Click2Move: Mech-armor removed, switching to pathfinding.") end
+          data.is_straight_line_move = nil
+          start_path_request_for_player(player_index)
+        else
+          stop_movement = true
+        end
+      else
+        local dist_to_goal = util_vector.distance(character.position, goal)
+
+        -- Stuck detection for straight-line movement
+        if data.last_position then
+          local moved = util_vector.distance(character.position, data.last_position)
+          if moved < 0.03 then data.stuck_counter = data.stuck_counter + 1 else data.stuck_counter = 0 end
+        end
+        data.last_position = { x = character.position.x, y = character.position.y }
+
+        -- Stop if arrived or stuck
+        if dist_to_goal < PROXIMITY_THRESHOLD() or data.stuck_counter > STUCK_THRESHOLD() then
+          if data.stuck_counter > STUCK_THRESHOLD() and DEBUG_MODE(player_index) then
+            player.print("Click2Move: Mech movement stopped (stuck).")
+          end
+          stop_movement = true
+        else
+          -- Set walking state to move towards the goal
+          local direction = get_character_direction(character.position, goal)
+          if direction then
+            data.is_auto_walking = true
+            character.walking_state = { walking = true, direction = direction }
+          else
+            -- This case happens when very close to the target, let the arrival check handle it
+            data.is_auto_walking = false
+            character.walking_state = { walking = false, direction = defines.direction.north }
+          end
+        end
+      end
+
+      if stop_movement then
+        -- Clean up and proceed to next goal if any
+        goto stop_and_cleanup
+      end
+
+      goto continue -- Skip pathfinding logic for this tick
     end
 
     -- If no path and not waiting, but have queued goals, ensure we request a path for first goal
@@ -493,10 +562,6 @@ local function on_tick(event)
 
     -- If still waiting for path, skip movement
     if not data.path then goto continue end
-
-    local stop_movement = false
-    local entity_to_move = player.vehicle or player.character
-    local vehicle = player.vehicle
 
     if not entity_to_move then
       stop_movement = true
@@ -636,6 +701,8 @@ local function on_tick(event)
       end
     end
 
+    ::stop_and_cleanup::
+
     if stop_movement then
       -- arrived or cancelled for this path/goal
       if entity_to_move and entity_to_move.valid then
@@ -659,6 +726,7 @@ local function on_tick(event)
       data.last_vehicle_position = nil
       data.retry_count = 0
       data.retry_at = nil
+      data.is_straight_line_move = nil
 
       -- remove completed goal from queue (it was goals[1])
       if data.goals and #data.goals > 0 then
