@@ -75,7 +75,10 @@ end
 
 -- Vehicle riding state towards a target
 local function get_vehicle_riding_state(vehicle, target_pos)
-  local radians = vehicle.orientation * 2 * math.pi
+  -- Factorio orientation: 0 is North, clockwise. Math functions: 0 is East, counter-clockwise.
+  -- We need to adjust the angle. A 90-degree (pi/2) clockwise rotation is needed.
+  -- Or, equivalently, subtract pi/2 from the standard angle.
+  local radians = vehicle.orientation * 2 * math.pi - (math.pi / 2)
   local v1 = {x = target_pos.x - vehicle.position.x, y = target_pos.y - vehicle.position.y}
 
   local forward = v1.x * math.cos(radians) + v1.y * math.sin(radians)
@@ -254,13 +257,15 @@ local function start_path_request_for_player(player_index)
   local data = ensure_player_data(player_index)
   if not data.goals or #data.goals == 0 then return end
   if data.path or data.path_id then return end -- already waiting or following a path
+  local entity_to_move = player.vehicle or player.character
+  if not entity_to_move then return end
 
   local goal = data.goals[1]
   if not goal then return end
 
   local params = create_path_request_params(player, goal)
   if not params then
-    -- cannot make path; drop this goal and try next
+    -- Cannot make path; drop this goal and try next
     table.remove(data.goals, 1)
     update_gui_for_player(player_index)
     -- try next if present
@@ -268,8 +273,8 @@ local function start_path_request_for_player(player_index)
     return
   end
 
-  -- request path
-  local path_id = player.surface.request_path(params)
+  -- Request path on the correct surface (where the entity is)
+  local path_id = entity_to_move.surface.request_path(params)
   data.path_id = path_id
   data.retry_count = data.retry_count or 0
   if DEBUG_MODE(player_index) then player.print("Click2Move: Requested path for " .. format_pos(goal) .. " (player " .. player_index .. ")") end
@@ -277,16 +282,24 @@ end
 
 -- Handles the custom input to initiate movement
 local function on_custom_input(event)
-  if event.input_name ~= "c2m-move-command" then return end
+  if event.input_name ~= "c2m-move-command" and event.input_name ~= "c2m-move-command-queue" then return end
   local player = game.players[event.player_index]
-  if not player or not player.connected then return end
-  if not (player.character or player.vehicle) then return end
+  local entity_to_move = player and (player.vehicle or player.character)
+  if not entity_to_move or not player.connected then return end
   if not event.cursor_position then return end
+
+  -- Check if the click was on a different surface than the entity being controlled
+  -- This handles remote control of vehicles on other planets.
+  local target_surface = event.cursor_position.surface or entity_to_move.surface
+  if target_surface ~= entity_to_move.surface then
+    if DEBUG_MODE(player.index) then player.print("Click2Move: Cannot path to a different surface.") end
+    return
+  end
 
   local data = ensure_player_data(player.index)
   local goal = { x = event.cursor_position.x, y = event.cursor_position.y }
 
-  if event.shift then -- TO FIX -- event.shift is undefined
+  if event.input_name == "c2m-move-command-queue" then
     -- queue this goal
     table.insert(data.goals, goal)
     if DEBUG_MODE(player.index) then player.print("Click2Move: Added goal to queue: " .. format_pos(goal)) end
@@ -312,6 +325,7 @@ local function on_custom_input(event)
   -- Ensure GUI reflects queue state
   update_gui_for_player(player.index)
   -- If not currently waiting for a path, immediately request one for first goal
+  
   start_path_request_for_player(player.index)
 end
 
@@ -527,14 +541,19 @@ local function on_tick(event)
       end
 
       local waypoint_pos = waypoint.position
-      local dist_wp = util_vector.distance(vehicle.position, waypoint_pos)
-      local waypoint_threshold = 2.0
+      local dist_to_waypoint = util_vector.distance(vehicle.position, waypoint_pos)
 
-      if dist_wp < waypoint_threshold then
+      -- Dynamic waypoint threshold based on vehicle speed
+      local speed_tiles_per_tick = vehicle.speed or 0 -- vehicle.speed is in tiles/tick
+      local safety_factor = 2.0 -- A bit higher for vehicles
+      local dynamic_waypoint_threshold = 2.0 + (speed_tiles_per_tick * safety_factor)
+
+      if dist_to_waypoint < dynamic_waypoint_threshold then
         data.current_waypoint = data.current_waypoint + 1
       end
 
       if data.current_waypoint > #data.path then
+        -- Reached the last waypoint, now check against final goal proximity
         local goal_pos = data.goals[1]
         local dist_goal = util_vector.distance(vehicle.position, goal_pos)
         if dist_goal < VEHICLE_PROXIMITY_THRESHOLD() then
@@ -582,8 +601,14 @@ local function on_tick(event)
           end
 
           if waypoint and waypoint.position then
-            local dist_wp = util_vector.distance(character.position, waypoint.position)
-            if dist_wp < PROXIMITY_THRESHOLD() then
+            local dist_to_waypoint = util_vector.distance(character.position, waypoint.position)
+
+            -- Dynamic proximity threshold based on character speed
+            local speed_tiles_per_second = player.character_running_speed or 0
+            local speed_tiles_per_tick = speed_tiles_per_second / 60
+            local safety_factor = 1.5 -- Can be tuned
+            local dynamic_threshold = PROXIMITY_THRESHOLD() + (speed_tiles_per_tick * safety_factor)
+            if dist_to_waypoint < dynamic_threshold then
               data.current_waypoint = data.current_waypoint + 1
             end
 
@@ -658,13 +683,8 @@ end
 -- Event registration and initialization
 local function initialize()
   script.on_event("c2m-move-command", on_custom_input)
-  script.on_event("bazinga", function(event)
-    local player = game.players[event.player_index]
-    if player and player.character then
-      player.character.walking_state = { walking = true, direction = defines.direction.north }
-    end
-    game.print("bazinga!")
-  end)
+  script.on_event("c2m-move-command-queue", on_custom_input)
+  script.on_event("bazinga", function(_event) game.print("bazinga!") end)
   script.on_event(defines.events.on_script_path_request_finished, on_path_request_finished)
   script.on_event(defines.events.on_gui_click, on_gui_click)
 
@@ -679,13 +699,8 @@ script.on_configuration_changed(initialize)
 script.on_load(function()
   -- re-register handlers on load
   script.on_event("c2m-move-command", on_custom_input)
-  script.on_event("bazinga", function(event)
-    local player = game.players[event.player_index]
-    if player and player.character then
-      player.character.walking_state = { walking = true, direction = defines.direction.north }
-    end
-    game.print("bazinga!")
-  end)
+  script.on_event("c2m-move-command-queue", on_custom_input)
+  script.on_event("bazinga", function(_event) game.print("bazinga!") end)
   script.on_event(defines.events.on_script_path_request_finished, on_path_request_finished)
   script.on_event(defines.events.on_gui_click, on_gui_click)
   script.on_nth_tick(UPDATE_INTERVAL() or 1, on_tick)

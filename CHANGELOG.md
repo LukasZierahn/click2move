@@ -1,0 +1,21 @@
+- feat: Refactor mod archive creation to use versioned directory structure
+- feat: Improve API key validation in publish workflow
+- feat: Add GitHub Actions workflow for mod publishing and update info.json with contact and homepage
+- feat: Add README
+- feat: Add thumbnail image for improved project visibility
+- feat: Add vehicle path margin setting and enhance vehicle stuck detection logic
+- feat: Refactor movement logic and enhance GUI interactions for character pathfinding
+- feat: Improve path rendering and entity handling
+- feat: Enhance character movement logic with improved stuck detection and pathfinding; refactor rendering and event handling
+- feat: Add stuck detection and repathing logic for character movement; update settings and descriptions
+- feat: Refactor movement settings to use global settings and improve debug functionality
+- feat: Add configuration settings for debug mode and movement thresholds
+- feat: Update character movement handling to use character position and improve walking state management
+- feat: Add 8-way movement direction detection and improve vehicle state handling
+- feat: Enhance movement handling by adding crosshair rendering and improving vehicle state management
+- feat: Improve character movement handling by immediately stopping movement on manual direction change
+- feat: Enhance movement handling with manual direction detection and path request improvements
+- feat: Update input handling and add new custom input command
+- feat: Improve movement handling and pathfinding logic
+- feat: Refactor movement logic and improve pathfinding handling
+- feat: Initial implementation of click-to-move

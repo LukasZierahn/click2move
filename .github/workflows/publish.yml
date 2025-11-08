@@ -49,6 +49,25 @@ jobs:
           mv info.json.tmp info.json
           echo "Updated info.json version to $VERSION"
 
+      - name: Generate changelog
+        id: changelog
+        run: |
+          set -euxo pipefail
+          CHANGELOG_FILE="CHANGELOG.md"
+          # Get the previous tag name
+          # This gets the second to last tag from a version-sorted list of tags
+          PREVIOUS_TAG=$(git tag --sort=-v:refname | sed -n '2p')
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous tag found, creating changelog from all commits."
+            git log --pretty=format:"- %s" > "$CHANGELOG_FILE"
+          else
+            echo "Generating changelog from $PREVIOUS_TAG to ${{ github.ref_name }}"
+            git log "${PREVIOUS_TAG}".."${{ github.ref_name }}" --pretty=format:"- %s" > "$CHANGELOG_FILE"
+          fi
+          echo "Generated ${CHANGELOG_FILE}:"
+          cat "$CHANGELOG_FILE"
+
       - name: Validate info.json (name & version)
         id: validate
         run: |
