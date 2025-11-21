@@ -227,7 +227,7 @@ end
 -- Cached config table (populated on init/load)
 ---@type Config
 local config = {
-  character_margin = 0.5,
+  character_margin = 0.45,
   proximity_threshold = 1.5,
   update_interval = 1,
   vehicle_proximity_threshold = 6.0,
@@ -237,7 +237,7 @@ local config = {
 
 local function load_config()
   ---@diagnostic disable: assign-type-mismatch
-  config.character_margin = settings.global["c2m-character-margin"].value or 0.5
+  config.character_margin = settings.global["c2m-character-margin"].value or 0.45
   config.proximity_threshold = settings.startup["c2m-character-proximity-threshold"].value or 1.5
   config.update_interval = settings.startup["c2m-update-interval"].value or 1
   config.vehicle_proximity_threshold = settings.startup["c2m-vehicle-proximity-threshold"].value or 6.0
@@ -310,6 +310,16 @@ local function ensure_player_data(player_index)
   return d
 end
 
+function tableToString(tbl)
+    if type(tbl) ~= "table" then return tostring(tbl) end
+    local str = "{ "
+    for k, v in pairs(tbl) do
+        str = str .. "[" .. tostring(k) .. "] = " .. tableToString(v) .. ", "
+    end
+    str = str:sub(1, -3) .. " }"
+    return str
+end
+
 -- Build path request parameters
 ---@param player LuaPlayer
 ---@param goal MapPosition
@@ -341,7 +351,7 @@ local function create_path_request_params(player, goal)
   end
 
   local collision_mask = (entity_to_move.prototype and entity_to_move.prototype.collision_mask) and entity_to_move.prototype.collision_mask or {}
-
+  game.print(tableToString(collision_mask))
   return {
     bounding_box = bounding_box,
     collision_mask = collision_mask,

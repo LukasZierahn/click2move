@@ -31,7 +31,8 @@ The default keybind can be changed in Factorio's control settings. Look for "**c
 *   **Uncontrolled Vehicle Movement**: Vehicles may occasionally move erratically. This is likely due to a narrow margin of error in the path following logic.
 *   **Basic Stuck Detection**: The current stuck detection is rudimentary and cannot navigate around obstacles that were not already avoided by the initial pathfinding.
 *   **Vehicle Continues in Map View**: The vehicle does not automatically stop when the player opens the map view, which can lead to the vehicle driving off-course while the player is not watching.
-
+*   When removing an item from the hotbar (using MMB), the mod places a walk target.
+*   The path may cross over pipes.
 ## Mod Settings
 
 You can adjust these settings in `Settings -> Mod settings`.
@@ -44,7 +45,7 @@ You can adjust these settings in `Settings -> Mod settings`.
 | **Character proximity threshold** | `Float` | Startup           | `1.5`   | How close (in tiles) the character must be to a waypoint to consider it "reached".                      |
 | **Vehicle proximity threshold**   | `Float` | Startup           | `6.0`   | How close (in tiles) a vehicle must be to the final goal to consider it "reached".                      |
 | **Stuck threshold**               | `Int`   | Startup           | `30`    | How many update intervals of no movement before the character/vehicle is considered stuck.              |
-| **Vehicle path margin**           | `Float` | Startup           | `1.0`   | The safety margin added to the vehicle's bounding box for pathfinding.                                  |
+| **Vehicle path margin**           | `Float` | Startup           | `2.0`   | The safety margin added to the vehicle's bounding box for pathfinding.                                  |
 
 > **Note**: `Startup` settings require a game restart to take effect. `Global` and `Per-Player` settings can be changed on the fly.
 
